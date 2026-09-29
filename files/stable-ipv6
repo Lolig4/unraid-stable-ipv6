@@ -16,17 +16,36 @@
 
 CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
 STATE=/var/run/stable-ipv6.addr
-LOCK=/var/run/stable-ipv6.lock
 PIDFILE=/var/run/stable-ipv6.pid
 
 IFACE=eth0
 SUFFIX=::5
+REBIND=yes
 [[ -f $CFG ]] && . "$CFG"
 
 # One instance only, a second start would stack another watcher on the same link.
-exec 9>"$LOCK"
-flock -n 9 || exit 0
+# Checked through the pid file rather than a lock: a lock lives on a file
+# descriptor, and rebinding restarts services that would inherit it and hold the
+# lock forever.
+OTHER=$(cat "$PIDFILE" 2>/dev/null)
+if [[ -n $OTHER && -r /proc/$OTHER/cmdline ]] &&
+   tr '\0' ' ' < "/proc/$OTHER/cmdline" | grep -q stable-ipv6; then
+    exit 0
+fi
 echo $$ > "$PIDFILE"
+
+# Unraid binds its services to the addresses that existed when they started, so
+# after a prefix change they keep serving the old one. This is the path its own
+# dhcpcd hook takes: update_services queues reload_services, which runs the
+# update action of every service that binds to an address. A queued job replaces
+# the previous one, so a burst of changes ends in a single reload, and the delay
+# covers the few seconds a fresh address stays tentative.
+rebind_services() {
+    [[ $REBIND == yes ]] || return 0
+    local UPDATE=/usr/local/emhttp/webGui/scripts/update_services
+    [[ -x $UPDATE ]] && "$UPDATE" 20
+    return 0
+}
 
 current_prefix() {
     ip -6 route show dev "$IFACE" |
@@ -51,6 +70,7 @@ sync_address() {
     if ip -6 addr add "$want/64" dev "$IFACE" noprefixroute 2>/dev/null; then
         printf "%s %s\n" "$IFACE" "$want" > "$STATE"
         logger -t stable-ipv6 "$IFACE now also has $want"
+        rebind_services
     fi
 }
 
@@ -106,6 +126,9 @@ trap 'kill $MONITOR $EVENTS 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
 # service, a container start is still picked up on the next pass.
 while :; do
     read -r -t 60 _ <&3
+    # One address change emits several lines. Drain them before syncing, or
+    # every line would trigger its own pass and its own service rebind.
+    while read -r -t 0.1 _ <&3; do :; done
     sync_address
     sync_tokens
 done

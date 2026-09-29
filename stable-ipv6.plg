@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stable-ipv6">
 <!ENTITY author    "Lolig4">
-<!ENTITY version   "1.01.01">
+<!ENTITY version   "1.02.00">
 <!ENTITY launch    "Settings/StableIPv6">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -13,6 +13,18 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
 
 <CHANGES>
+###1.02.00
+- Tell nginx, and optionally sshd, to rebind after the host address changed.
+  Unraid binds them to the addresses present at service start, so they served
+  the old one after a prefix change.
+
+###1.02.00
+- Have Unraid rebind its services after the host address changed, through the
+  same update_services path its dhcpcd hook uses. They bind to the addresses
+  present at service start and kept serving the old one after a prefix change.
+- Coalesce the watcher events. One address change emits several lines and each
+  of them used to trigger its own pass.
+
 ###1.01.01
 - Lay the container suffixes out like the other fields and drop the help texts,
   which need a plug anchor to render and looked broken without one.
@@ -36,6 +48,7 @@ padding 1.0.10 would sort below 1.0.9 and the update would be refused.
 SERVICE="disable"
 IFACE="eth0"
 SUFFIX="::5"
+REBIND="yes"
 ]]></INLINE>
 </FILE>
 
@@ -59,17 +72,36 @@ SUFFIX="::5"
 
 CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
 STATE=/var/run/stable-ipv6.addr
-LOCK=/var/run/stable-ipv6.lock
 PIDFILE=/var/run/stable-ipv6.pid
 
 IFACE=eth0
 SUFFIX=::5
+REBIND=yes
 [[ -f $CFG ]] && . "$CFG"
 
 # One instance only, a second start would stack another watcher on the same link.
-exec 9>"$LOCK"
-flock -n 9 || exit 0
+# Checked through the pid file rather than a lock: a lock lives on a file
+# descriptor, and rebinding restarts services that would inherit it and hold the
+# lock forever.
+OTHER=$(cat "$PIDFILE" 2>/dev/null)
+if [[ -n $OTHER && -r /proc/$OTHER/cmdline ]] &&
+   tr '\0' ' ' < "/proc/$OTHER/cmdline" | grep -q stable-ipv6; then
+    exit 0
+fi
 echo $$ > "$PIDFILE"
+
+# Unraid binds its services to the addresses that existed when they started, so
+# after a prefix change they keep serving the old one. This is the path its own
+# dhcpcd hook takes: update_services queues reload_services, which runs the
+# update action of every service that binds to an address. A queued job replaces
+# the previous one, so a burst of changes ends in a single reload, and the delay
+# covers the few seconds a fresh address stays tentative.
+rebind_services() {
+    [[ $REBIND == yes ]] || return 0
+    local UPDATE=/usr/local/emhttp/webGui/scripts/update_services
+    [[ -x $UPDATE ]] && "$UPDATE" 20
+    return 0
+}
 
 current_prefix() {
     ip -6 route show dev "$IFACE" |
@@ -94,6 +126,7 @@ sync_address() {
     if ip -6 addr add "$want/64" dev "$IFACE" noprefixroute 2>/dev/null; then
         printf "%s %s\n" "$IFACE" "$want" > "$STATE"
         logger -t stable-ipv6 "$IFACE now also has $want"
+        rebind_services
     fi
 }
 
@@ -149,6 +182,9 @@ trap 'kill $MONITOR $EVENTS 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
 # service, a container start is still picked up on the next pass.
 while :; do
     read -r -t 60 _ <&3
+    # One address change emits several lines. Drain them before syncing, or
+    # every line would trigger its own pass and its own service rebind.
+    while read -r -t 0.1 _ <&3; do :; done
     sync_address
     sync_tokens
 done
@@ -168,6 +204,7 @@ PIDFILE=/var/run/stable-ipv6.pid
 
 SERVICE="disable"
 IFACE="eth0"
+REBIND="yes"
 [[ -f $CFG ]] && . "$CFG"
 
 stop_daemon() {
@@ -187,7 +224,13 @@ stop_daemon() {
     # the interface from the config would miss it after a switch.
     local old_if old_addr
     [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
-    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    if [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null; then
+        # Leave nothing bound to an address that no longer exists.
+        if [[ $REBIND == yes ]]; then
+            UPDATE=/usr/local/emhttp/webGui/scripts/update_services
+            [[ -x $UPDATE ]] && "$UPDATE" 20
+        fi
+    fi
     rm -f "$STATE"
 }
 
@@ -212,6 +255,7 @@ $cfg     = parse_plugin_cfg("stable-ipv6", true);
 $service = $cfg['SERVICE'] ?: 'disable';
 $iface   = $cfg['IFACE']   ?: 'eth0';
 $suffix  = $cfg['SUFFIX']  ?: '::5';
+$rebind  = $cfg['REBIND']  ?: 'yes';
 $state   = explode(' ', @trim(@file_get_contents('/var/run/stable-ipv6.addr')));
 $current = count($state) > 1 ? $state[1] : '';
 $running = is_file('/var/run/stable-ipv6.pid')
@@ -274,6 +318,12 @@ Interface:
 Host suffix:
 : <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
 
+Rebind Unraid services:
+: <select name="REBIND" size="1">
+  <?=mk_option($rebind, "no",  "No")?>
+  <?=mk_option($rebind, "yes", "Yes")?>
+  </select>
+
 &nbsp;
 : &nbsp;
 
@@ -315,7 +365,7 @@ PID=$(cat /var/run/stable-ipv6.pid 2>/dev/null)
 [[ -n $PID ]] && kill "$PID" 2>/dev/null
 [[ -r /var/run/stable-ipv6.addr ]] && read -r OLD_IF OLD_ADDR < /var/run/stable-ipv6.addr
 [[ -n $OLD_ADDR ]] && ip -6 addr del "$OLD_ADDR/64" dev "$OLD_IF" 2>/dev/null
-rm -f /var/run/stable-ipv6.pid /var/run/stable-ipv6.addr /var/run/stable-ipv6.lock
+rm -f /var/run/stable-ipv6.pid /var/run/stable-ipv6.addr
 rm -rf /usr/local/emhttp/plugins/stable-ipv6 /boot/config/plugins/stable-ipv6
 echo "stable-ipv6 has been removed"
 ]]></INLINE>

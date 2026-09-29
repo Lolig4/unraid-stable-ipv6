@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stable-ipv6">
 <!ENTITY author    "Lolig4">
-<!ENTITY version   "1.01.01">
+<!ENTITY version   "1.02.00">
 <!ENTITY launch    "Settings/StableIPv6">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -13,6 +13,18 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
 
 <CHANGES>
+###1.02.00
+- Tell nginx, and optionally sshd, to rebind after the host address changed.
+  Unraid binds them to the addresses present at service start, so they served
+  the old one after a prefix change.
+
+###1.02.00
+- Have Unraid rebind its services after the host address changed, through the
+  same update_services path its dhcpcd hook uses. They bind to the addresses
+  present at service start and kept serving the old one after a prefix change.
+- Coalesce the watcher events. One address change emits several lines and each
+  of them used to trigger its own pass.
+
 ###1.01.01
 - Lay the container suffixes out like the other fields and drop the help texts,
   which need a plug anchor to render and looked broken without one.

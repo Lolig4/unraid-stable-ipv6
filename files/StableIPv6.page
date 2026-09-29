@@ -7,6 +7,7 @@ $cfg     = parse_plugin_cfg("stable-ipv6", true);
 $service = $cfg['SERVICE'] ?: 'disable';
 $iface   = $cfg['IFACE']   ?: 'eth0';
 $suffix  = $cfg['SUFFIX']  ?: '::5';
+$rebind  = $cfg['REBIND']  ?: 'yes';
 $state   = explode(' ', @trim(@file_get_contents('/var/run/stable-ipv6.addr')));
 $current = count($state) > 1 ? $state[1] : '';
 $running = is_file('/var/run/stable-ipv6.pid')
@@ -68,6 +69,12 @@ Interface:
 
 Host suffix:
 : <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
+
+Rebind Unraid services:
+: <select name="REBIND" size="1">
+  <?=mk_option($rebind, "no",  "No")?>
+  <?=mk_option($rebind, "yes", "Yes")?>
+  </select>
 
 &nbsp;
 : &nbsp;

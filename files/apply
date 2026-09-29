@@ -9,6 +9,7 @@ PIDFILE=/var/run/stable-ipv6.pid
 
 SERVICE="disable"
 IFACE="eth0"
+REBIND="yes"
 [[ -f $CFG ]] && . "$CFG"
 
 stop_daemon() {
@@ -28,7 +29,13 @@ stop_daemon() {
     # the interface from the config would miss it after a switch.
     local old_if old_addr
     [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
-    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    if [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null; then
+        # Leave nothing bound to an address that no longer exists.
+        if [[ $REBIND == yes ]]; then
+            UPDATE=/usr/local/emhttp/webGui/scripts/update_services
+            [[ -x $UPDATE ]] && "$UPDATE" 20
+        fi
+    fi
     rm -f "$STATE"
 }
 
