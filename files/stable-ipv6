@@ -64,11 +64,19 @@ sync_tokens() {
     while read -r name; do
         key=$(token_key "$name")
         want=${!key}
-        [[ -n $want ]] || continue
         pid=$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)
         [[ -n $pid && $pid != 0 ]] || continue
         # Docker always names the container side eth0, whatever the parent is.
         have=$(nsenter -t "$pid" -n ip token show dev eth0 2>/dev/null | awk '{print $2}')
+        [[ $have == "::" ]] && have=
+        if [[ -z $want ]]; then
+            # The suffix was cleared in the settings, so hand the container back
+            # to plain SLAAC instead of leaving our token on it.
+            if [[ -n $have ]] && nsenter -t "$pid" -n ip token del "$have" dev eth0 2>/dev/null; then
+                logger -t stable-ipv6 "$name token $have removed"
+            fi
+            continue
+        fi
         [[ $have == "$want" ]] && continue
         if nsenter -t "$pid" -n ip token set "$want" dev eth0 2>/dev/null; then
             logger -t stable-ipv6 "$name now uses token $want"

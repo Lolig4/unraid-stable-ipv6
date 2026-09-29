@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stable-ipv6">
 <!ENTITY author    "Lolig4">
-<!ENTITY version   "1.01.00">
+<!ENTITY version   "1.01.01">
 <!ENTITY launch    "Settings/StableIPv6">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -13,6 +13,10 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
 
 <CHANGES>
+###1.01.01
+- Lay the container suffixes out like the other fields and drop the help texts,
+  which need a plug anchor to render and looked broken without one.
+
 ###1.01.00
 - Give containers on the interface's macvlan network a fixed interface
   identifier, configurable per container in the settings page.
@@ -103,11 +107,19 @@ sync_tokens() {
     while read -r name; do
         key=$(token_key "$name")
         want=${!key}
-        [[ -n $want ]] || continue
         pid=$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)
         [[ -n $pid && $pid != 0 ]] || continue
         # Docker always names the container side eth0, whatever the parent is.
         have=$(nsenter -t "$pid" -n ip token show dev eth0 2>/dev/null | awk '{print $2}')
+        [[ $have == "::" ]] && have=
+        if [[ -z $want ]]; then
+            # The suffix was cleared in the settings, so hand the container back
+            # to plain SLAAC instead of leaving our token on it.
+            if [[ -n $have ]] && nsenter -t "$pid" -n ip token del "$have" dev eth0 2>/dev/null; then
+                logger -t stable-ipv6 "$name token $have removed"
+            fi
+            continue
+        fi
         [[ $have == "$want" ]] && continue
         if nsenter -t "$pid" -n ip token set "$want" dev eth0 2>/dev/null; then
             logger -t stable-ipv6 "$name now uses token $want"
@@ -205,15 +217,25 @@ $current = count($state) > 1 ? $state[1] : '';
 $running = is_file('/var/run/stable-ipv6.pid')
            && @posix_kill((int)@file_get_contents('/var/run/stable-ipv6.pid'), 0);
 
-// Containers on the macvlan network named after the interface, which is what
-// "Custom : eth0" in a container template means.
+// Containers on that interface's macvlan network. One with an address pinned in
+// its template is left out: a suffix would not help it, the pinned address
+// belongs to the subnet docker was created with and dies with the prefix.
 $members = [];
-foreach (explode("\n", (string)shell_exec("docker ps -a --format '{{.Names}}|{{.Networks}}' 2>/dev/null")) as $line) {
-    if (trim($line) == "") continue;
-    $part = explode("|", $line, 2);
-    if (count($part) < 2 || !in_array($iface, explode(",", trim($part[1])))) continue;
-    $members[trim($part[0])] = "TOK_".preg_replace('/[^A-Za-z0-9]/', '_', trim($part[0]));
+$ids = trim((string)shell_exec("docker ps -aq 2>/dev/null"));
+if ($ids !== "") {
+    $fmt = '{{.Name}}|{{json .NetworkSettings.Networks}}';
+    $out = (string)shell_exec("docker inspect --format ".escapeshellarg($fmt)." ".str_replace("\n", " ", $ids)." 2>/dev/null");
+    foreach (explode("\n", $out) as $line) {
+        $part = explode("|", $line, 2);
+        if (count($part) < 2) continue;
+        $name = ltrim(trim($part[0]), "/");
+        $nets = json_decode($part[1], true);
+        if (!isset($nets[$iface])) continue;
+        if (($nets[$iface]["IPAMConfig"]["IPv6Address"] ?? "") !== "") continue;
+        $members[$name] = "TOK_".preg_replace('/[^A-Za-z0-9]/', '_', $name);
+    }
 }
+ksort($members);
 ?>
 
 Status:
@@ -252,32 +274,22 @@ Interface:
 Host suffix:
 : <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
 
-> The interface identifier that gets combined with the prefix your provider
-> delegates. `::5` on a delegated `2001:db8:1:2::/64` gives `2001:db8:1:2::5`.
-> The address follows automatically when the prefix changes.
+&nbsp;
+: &nbsp;
 
-<?php if ($members): ?>
-Container suffixes:
-: <table style="width:auto">
-  <?php foreach ($members as $name => $key): ?>
-  <tr>
-    <td style="padding-right:1em"><?=htmlspecialchars($name)?></td>
-    <td><input type="text" name="<?=$key?>" maxlength="24"
-               value="<?=htmlspecialchars($cfg[$key] ?? '')?>" placeholder="empty = not managed"></td>
-  </tr>
-  <?php endforeach; ?>
-  </table>
+<?php if (!$members): ?>
+**Container suffixes**:
+: none on <?=htmlspecialchars($iface)?> without a pinned address
 
-> Containers on **<?=htmlspecialchars($iface)?>** get their address from the
-> router advertisement, so a suffix here becomes their interface identifier and
-> follows the prefix on its own. Leave the **Fixed IP address** field of the
-> container template empty for IPv6, an address pinned there dies with the
-> prefix. A suffix is reapplied on every container start.
 <?php else: ?>
-Container suffixes:
-: no containers on <?=htmlspecialchars($iface)?>
-<?php endif; ?>
+**Container suffixes**:
+: &nbsp;
 
+<?php foreach ($members as $name => $key): ?>
+<?=htmlspecialchars($name)?>:
+: <input type="text" name="<?=$key?>" maxlength="24" value="<?=htmlspecialchars($cfg[$key] ?? '')?>" placeholder="not managed">
+
+<?php endforeach; endif; ?>
 &nbsp;
 : <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
 </form>
