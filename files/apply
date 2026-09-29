@@ -1,0 +1,41 @@
+#!/bin/bash
+# Starts or stops the daemon according to the saved settings. Called by the
+# settings page after saving and by the plugin install on every boot.
+
+CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
+DAEMON=/usr/local/emhttp/plugins/stable-ipv6/scripts/stable-ipv6
+STATE=/var/run/stable-ipv6.addr
+PIDFILE=/var/run/stable-ipv6.pid
+
+SERVICE="disable"
+IFACE="eth0"
+[[ -f $CFG ]] && . "$CFG"
+
+stop_daemon() {
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null)
+    # Kill by recorded PID. A pattern match over the process list would also
+    # hit this script's own command line.
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        for _ in 1 2 3 4 5; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+    fi
+    rm -f "$PIDFILE"
+    # Give back the address we added, on the interface we put it on. Reading
+    # the interface from the config would miss it after a switch.
+    local old_if old_addr
+    [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
+    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    rm -f "$STATE"
+}
+
+stop_daemon
+if [[ $SERVICE == "enable" ]]; then
+    setsid nohup bash "$DAEMON" >/dev/null 2>&1 </dev/null &
+    echo "stable-ipv6: started on $IFACE with suffix ${SUFFIX:-::5}"
+else
+    echo "stable-ipv6: stopped"
+fi

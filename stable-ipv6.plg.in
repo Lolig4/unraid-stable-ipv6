@@ -1,0 +1,63 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "stable-ipv6">
+<!ENTITY author    "Lolig4">
+<!ENTITY version   "1.00.00">
+<!ENTITY launch    "Settings/StableIPv6">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
+<!ENTITY pluginURL "&gitURL;/&name;.plg">
+<!ENTITY support   "https://github.com/Lolig4/unraid-stable-ipv6/issues">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
+
+<CHANGES>
+###1.00.00
+- First release.
+
+Note on the version format: Unraid compares plugin versions with strcmp, not
+version_compare, so every component is zero padded to two digits. Without the
+padding 1.0.10 would sort below 1.0.9 and the update would be refused.
+</CHANGES>
+
+<!-- Default configuration. The plugin installer never overwrites an existing
+     file, so the settings survive an update and a reboot. -->
+<FILE Name="&plgPATH;/&name;.cfg">
+<INLINE><![CDATA[
+@@stable-ipv6.cfg@@
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/scripts/stable-ipv6">
+<INLINE><![CDATA[
+@@stable-ipv6@@
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/scripts/apply">
+<INLINE><![CDATA[
+@@apply@@
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/StableIPv6.page">
+<INLINE><![CDATA[
+@@StableIPv6.page@@
+]]></INLINE>
+</FILE>
+
+<!-- Runs on install and on every boot, after the files above are in place. -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE><![CDATA[
+@@hook-install.sh@@
+]]></INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+@@hook-remove.sh@@
+]]></INLINE>
+</FILE>
+
+</PLUGIN>

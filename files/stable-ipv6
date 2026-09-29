@@ -1,0 +1,61 @@
+#!/bin/bash
+# Keeps <delegated prefix><suffix> on the configured interface, so the host
+# keeps a short IPv6 when the ISP hands out a new prefix.
+#
+# dhcpcd 9.x forms its address from the MAC (slaac hwaddr) and has no option for
+# a fixed suffix. The kernel token mechanism does not help either, because
+# dhcpcd handles the router advertisements itself and leaves accept_ra at 0, so
+# the kernel never forms a SLAAC address of its own. Hence a second address,
+# maintained here. dhcpcd 10 adds "slaac token", which would replace all of this.
+
+CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
+STATE=/var/run/stable-ipv6.addr
+LOCK=/var/run/stable-ipv6.lock
+PIDFILE=/var/run/stable-ipv6.pid
+
+IFACE=eth0
+SUFFIX=::5
+[[ -f $CFG ]] && . "$CFG"
+
+# One instance only, a second start would stack another monitor on the same link.
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+echo $$ > "$PIDFILE"
+
+current_prefix() {
+    ip -6 route show dev "$IFACE" |
+        awk '$1 !~ /^(default|fe80)/ && $1 ~ /::\/64$/ {print $1; exit}'
+}
+
+sync_address() {
+    local prefix want old_if old_addr
+    prefix=$(current_prefix)
+    [[ -n $prefix ]] || return 0
+    want="${prefix%::/64}${SUFFIX}"
+
+    # The state records the interface as well, so a switch to another one can
+    # still clean up the address it left behind.
+    [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
+    if [[ $old_if == "$IFACE" && $old_addr == "$want" ]] &&
+       ip -6 addr show dev "$IFACE" | grep -q " $want/64 "; then
+        return 0
+    fi
+    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    # noprefixroute: the on-link route already comes from the router advertisement
+    if ip -6 addr add "$want/64" dev "$IFACE" noprefixroute 2>/dev/null; then
+        printf "%s %s\n" "$IFACE" "$want" > "$STATE"
+        logger -t stable-ipv6 "$IFACE now also has $want"
+    fi
+}
+
+sync_address
+
+# Process substitution instead of a pipe, so the loop runs in this shell and the
+# trap can take the monitor down with us instead of leaving it orphaned.
+exec 3< <(ip -6 monitor address route dev "$IFACE" 2>/dev/null)
+MONITOR=$!
+trap 'kill $MONITOR 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
+
+while read -r _ <&3; do
+    sync_address
+done

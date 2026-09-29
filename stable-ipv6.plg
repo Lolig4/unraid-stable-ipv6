@@ -1,0 +1,233 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "stable-ipv6">
+<!ENTITY author    "Lolig4">
+<!ENTITY version   "1.00.00">
+<!ENTITY launch    "Settings/StableIPv6">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
+<!ENTITY pluginURL "&gitURL;/&name;.plg">
+<!ENTITY support   "https://github.com/Lolig4/unraid-stable-ipv6/issues">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
+
+<CHANGES>
+###1.00.00
+- First release.
+
+Note on the version format: Unraid compares plugin versions with strcmp, not
+version_compare, so every component is zero padded to two digits. Without the
+padding 1.0.10 would sort below 1.0.9 and the update would be refused.
+</CHANGES>
+
+<!-- Default configuration. The plugin installer never overwrites an existing
+     file, so the settings survive an update and a reboot. -->
+<FILE Name="&plgPATH;/&name;.cfg">
+<INLINE><![CDATA[
+SERVICE="disable"
+IFACE="eth0"
+SUFFIX="::5"
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/scripts/stable-ipv6">
+<INLINE><![CDATA[
+#!/bin/bash
+# Keeps <delegated prefix><suffix> on the configured interface, so the host
+# keeps a short IPv6 when the ISP hands out a new prefix.
+#
+# dhcpcd 9.x forms its address from the MAC (slaac hwaddr) and has no option for
+# a fixed suffix. The kernel token mechanism does not help either, because
+# dhcpcd handles the router advertisements itself and leaves accept_ra at 0, so
+# the kernel never forms a SLAAC address of its own. Hence a second address,
+# maintained here. dhcpcd 10 adds "slaac token", which would replace all of this.
+
+CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
+STATE=/var/run/stable-ipv6.addr
+LOCK=/var/run/stable-ipv6.lock
+PIDFILE=/var/run/stable-ipv6.pid
+
+IFACE=eth0
+SUFFIX=::5
+[[ -f $CFG ]] && . "$CFG"
+
+# One instance only, a second start would stack another monitor on the same link.
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+echo $$ > "$PIDFILE"
+
+current_prefix() {
+    ip -6 route show dev "$IFACE" |
+        awk '$1 !~ /^(default|fe80)/ && $1 ~ /::\/64$/ {print $1; exit}'
+}
+
+sync_address() {
+    local prefix want old_if old_addr
+    prefix=$(current_prefix)
+    [[ -n $prefix ]] || return 0
+    want="${prefix%::/64}${SUFFIX}"
+
+    # The state records the interface as well, so a switch to another one can
+    # still clean up the address it left behind.
+    [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
+    if [[ $old_if == "$IFACE" && $old_addr == "$want" ]] &&
+       ip -6 addr show dev "$IFACE" | grep -q " $want/64 "; then
+        return 0
+    fi
+    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    # noprefixroute: the on-link route already comes from the router advertisement
+    if ip -6 addr add "$want/64" dev "$IFACE" noprefixroute 2>/dev/null; then
+        printf "%s %s\n" "$IFACE" "$want" > "$STATE"
+        logger -t stable-ipv6 "$IFACE now also has $want"
+    fi
+}
+
+sync_address
+
+# Process substitution instead of a pipe, so the loop runs in this shell and the
+# trap can take the monitor down with us instead of leaving it orphaned.
+exec 3< <(ip -6 monitor address route dev "$IFACE" 2>/dev/null)
+MONITOR=$!
+trap 'kill $MONITOR 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
+
+while read -r _ <&3; do
+    sync_address
+done
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/scripts/apply">
+<INLINE><![CDATA[
+#!/bin/bash
+# Starts or stops the daemon according to the saved settings. Called by the
+# settings page after saving and by the plugin install on every boot.
+
+CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
+DAEMON=/usr/local/emhttp/plugins/stable-ipv6/scripts/stable-ipv6
+STATE=/var/run/stable-ipv6.addr
+PIDFILE=/var/run/stable-ipv6.pid
+
+SERVICE="disable"
+IFACE="eth0"
+[[ -f $CFG ]] && . "$CFG"
+
+stop_daemon() {
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null)
+    # Kill by recorded PID. A pattern match over the process list would also
+    # hit this script's own command line.
+    if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        for _ in 1 2 3 4 5; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+    fi
+    rm -f "$PIDFILE"
+    # Give back the address we added, on the interface we put it on. Reading
+    # the interface from the config would miss it after a switch.
+    local old_if old_addr
+    [[ -r $STATE ]] && read -r old_if old_addr < "$STATE"
+    [[ -n $old_addr ]] && ip -6 addr del "$old_addr/64" dev "${old_if:-$IFACE}" 2>/dev/null
+    rm -f "$STATE"
+}
+
+stop_daemon
+if [[ $SERVICE == "enable" ]]; then
+    setsid nohup bash "$DAEMON" >/dev/null 2>&1 </dev/null &
+    echo "stable-ipv6: started on $IFACE with suffix ${SUFFIX:-::5}"
+else
+    echo "stable-ipv6: stopped"
+fi
+]]></INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/StableIPv6.page">
+<INLINE><![CDATA[
+Menu="Utilities"
+Title="Stable IPv6"
+Icon="icon-network"
+---
+<?php
+$cfg     = parse_plugin_cfg("stable-ipv6", true);
+$service = $cfg['SERVICE'] ?: 'disable';
+$iface   = $cfg['IFACE']   ?: 'eth0';
+$suffix  = $cfg['SUFFIX']  ?: '::5';
+$state   = explode(' ', @trim(@file_get_contents('/var/run/stable-ipv6.addr')));
+$current = count($state) > 1 ? $state[1] : '';
+$running = is_file('/var/run/stable-ipv6.pid')
+           && @posix_kill((int)@file_get_contents('/var/run/stable-ipv6.pid'), 0);
+?>
+
+Status:
+: <?=$running ? "<span class='green-text'>running</span>" : "<span class='orange-text'>stopped</span>"?>
+
+Current address:
+: <?=$current ?: "none"?>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="stable-ipv6/stable-ipv6.cfg" />
+<input type="hidden" name="#command" value="plugins/stable-ipv6/scripts/apply" />
+
+Enable:
+: <select name="SERVICE" size="1">
+  <?=mk_option($service, "disable", "No")?>
+  <?=mk_option($service, "enable", "Yes")?>
+  </select>
+
+Interface:
+: <select name="IFACE" size="1">
+  <?php foreach (glob("/sys/class/net/*") as $dir) {
+            $nic = basename($dir);
+            if ($nic == "lo" || substr($nic, 0, 4) == "veth" || substr($nic, 0, 6) == "docker") continue;
+            $routes = shell_exec("ip -6 route show dev ".escapeshellarg($nic)." 2>/dev/null");
+            $prefix = "";
+            foreach (explode("\n", (string)$routes) as $line) {
+                $first = strtok($line, " ");
+                if ($first && substr($first, 0, 7) != "default" && substr($first, 0, 4) != "fe80"
+                    && substr($first, -5) == "::/64") { $prefix = $first; break; }
+            }
+            echo mk_option($iface, $nic, $prefix ? "$nic  ($prefix)" : "$nic  (no IPv6)");
+        } ?>
+  </select>
+
+Suffix:
+: <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
+
+> The interface identifier that gets combined with the prefix your provider
+> delegates. `::5` on a delegated `2001:db8:1:2::/64` gives `2001:db8:1:2::5`.
+> The address follows automatically when the prefix changes.
+
+&nbsp;
+: <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
+</form>
+]]></INLINE>
+</FILE>
+
+<!-- Runs on install and on every boot, after the files above are in place. -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE><![CDATA[
+chmod +x /usr/local/emhttp/plugins/stable-ipv6/scripts/stable-ipv6 \
+         /usr/local/emhttp/plugins/stable-ipv6/scripts/apply
+/usr/local/emhttp/plugins/stable-ipv6/scripts/apply
+echo ""
+echo "stable-ipv6 installed. Settings -> User Utilities -> Stable IPv6"
+echo ""
+]]></INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+SERVICE="disable" /usr/local/emhttp/plugins/stable-ipv6/scripts/apply 2>/dev/null
+PID=$(cat /var/run/stable-ipv6.pid 2>/dev/null)
+[[ -n $PID ]] && kill "$PID" 2>/dev/null
+[[ -r /var/run/stable-ipv6.addr ]] && read -r OLD_IF OLD_ADDR < /var/run/stable-ipv6.addr
+[[ -n $OLD_ADDR ]] && ip -6 addr del "$OLD_ADDR/64" dev "$OLD_IF" 2>/dev/null
+rm -f /var/run/stable-ipv6.pid /var/run/stable-ipv6.addr /var/run/stable-ipv6.lock
+rm -rf /usr/local/emhttp/plugins/stable-ipv6 /boot/config/plugins/stable-ipv6
+echo "stable-ipv6 has been removed"
+]]></INLINE>
+</FILE>
+
+</PLUGIN>

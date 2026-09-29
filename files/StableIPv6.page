@@ -1,0 +1,57 @@
+Menu="Utilities"
+Title="Stable IPv6"
+Icon="icon-network"
+---
+<?php
+$cfg     = parse_plugin_cfg("stable-ipv6", true);
+$service = $cfg['SERVICE'] ?: 'disable';
+$iface   = $cfg['IFACE']   ?: 'eth0';
+$suffix  = $cfg['SUFFIX']  ?: '::5';
+$state   = explode(' ', @trim(@file_get_contents('/var/run/stable-ipv6.addr')));
+$current = count($state) > 1 ? $state[1] : '';
+$running = is_file('/var/run/stable-ipv6.pid')
+           && @posix_kill((int)@file_get_contents('/var/run/stable-ipv6.pid'), 0);
+?>
+
+Status:
+: <?=$running ? "<span class='green-text'>running</span>" : "<span class='orange-text'>stopped</span>"?>
+
+Current address:
+: <?=$current ?: "none"?>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="stable-ipv6/stable-ipv6.cfg" />
+<input type="hidden" name="#command" value="plugins/stable-ipv6/scripts/apply" />
+
+Enable:
+: <select name="SERVICE" size="1">
+  <?=mk_option($service, "disable", "No")?>
+  <?=mk_option($service, "enable", "Yes")?>
+  </select>
+
+Interface:
+: <select name="IFACE" size="1">
+  <?php foreach (glob("/sys/class/net/*") as $dir) {
+            $nic = basename($dir);
+            if ($nic == "lo" || substr($nic, 0, 4) == "veth" || substr($nic, 0, 6) == "docker") continue;
+            $routes = shell_exec("ip -6 route show dev ".escapeshellarg($nic)." 2>/dev/null");
+            $prefix = "";
+            foreach (explode("\n", (string)$routes) as $line) {
+                $first = strtok($line, " ");
+                if ($first && substr($first, 0, 7) != "default" && substr($first, 0, 4) != "fe80"
+                    && substr($first, -5) == "::/64") { $prefix = $first; break; }
+            }
+            echo mk_option($iface, $nic, $prefix ? "$nic  ($prefix)" : "$nic  (no IPv6)");
+        } ?>
+  </select>
+
+Suffix:
+: <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
+
+> The interface identifier that gets combined with the prefix your provider
+> delegates. `::5` on a delegated `2001:db8:1:2::/64` gives `2001:db8:1:2::5`.
+> The address follows automatically when the prefix changes.
+
+&nbsp;
+: <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
+</form>
