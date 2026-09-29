@@ -11,17 +11,28 @@ $state   = explode(' ', @trim(@file_get_contents('/var/run/stable-ipv6.addr')));
 $current = count($state) > 1 ? $state[1] : '';
 $running = is_file('/var/run/stable-ipv6.pid')
            && @posix_kill((int)@file_get_contents('/var/run/stable-ipv6.pid'), 0);
+
+// Containers on the macvlan network named after the interface, which is what
+// "Custom : eth0" in a container template means.
+$members = [];
+foreach (explode("\n", (string)shell_exec("docker ps -a --format '{{.Names}}|{{.Networks}}' 2>/dev/null")) as $line) {
+    if (trim($line) == "") continue;
+    $part = explode("|", $line, 2);
+    if (count($part) < 2 || !in_array($iface, explode(",", trim($part[1])))) continue;
+    $members[trim($part[0])] = "TOK_".preg_replace('/[^A-Za-z0-9]/', '_', trim($part[0]));
+}
 ?>
 
 Status:
 : <?=$running ? "<span class='green-text'>running</span>" : "<span class='orange-text'>stopped</span>"?>
 
-Current address:
+Host address:
 : <?=$current ?: "none"?>
 
 <form markdown="1" method="POST" action="/update.php" target="progressFrame">
 <input type="hidden" name="#file" value="stable-ipv6/stable-ipv6.cfg" />
 <input type="hidden" name="#command" value="plugins/stable-ipv6/scripts/apply" />
+<input type="hidden" name="#cleanup" value="true" />
 
 Enable:
 : <select name="SERVICE" size="1">
@@ -45,12 +56,34 @@ Interface:
         } ?>
   </select>
 
-Suffix:
+Host suffix:
 : <input type="text" name="SUFFIX" maxlength="24" value="<?=htmlspecialchars($suffix)?>" placeholder="::5">
 
 > The interface identifier that gets combined with the prefix your provider
 > delegates. `::5` on a delegated `2001:db8:1:2::/64` gives `2001:db8:1:2::5`.
 > The address follows automatically when the prefix changes.
+
+<?php if ($members): ?>
+Container suffixes:
+: <table style="width:auto">
+  <?php foreach ($members as $name => $key): ?>
+  <tr>
+    <td style="padding-right:1em"><?=htmlspecialchars($name)?></td>
+    <td><input type="text" name="<?=$key?>" maxlength="24"
+               value="<?=htmlspecialchars($cfg[$key] ?? '')?>" placeholder="empty = not managed"></td>
+  </tr>
+  <?php endforeach; ?>
+  </table>
+
+> Containers on **<?=htmlspecialchars($iface)?>** get their address from the
+> router advertisement, so a suffix here becomes their interface identifier and
+> follows the prefix on its own. Leave the **Fixed IP address** field of the
+> container template empty for IPv6, an address pinned there dies with the
+> prefix. A suffix is reapplied on every container start.
+<?php else: ?>
+Container suffixes:
+: no containers on <?=htmlspecialchars($iface)?>
+<?php endif; ?>
 
 &nbsp;
 : <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">

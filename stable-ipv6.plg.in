@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "stable-ipv6">
 <!ENTITY author    "Lolig4">
-<!ENTITY version   "1.00.00">
+<!ENTITY version   "1.01.00">
 <!ENTITY launch    "Settings/StableIPv6">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/Lolig4/unraid-stable-ipv6/main">
 <!ENTITY pluginURL "&gitURL;/&name;.plg">
@@ -13,6 +13,10 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="globe" min="6.12.0">
 
 <CHANGES>
+###1.01.00
+- Give containers on the interface's macvlan network a fixed interface
+  identifier, configurable per container in the settings page.
+
 ###1.00.00
 - First release.
 

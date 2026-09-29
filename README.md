@@ -8,6 +8,12 @@ interface, and the suffix (default `::5`). On a delegated
 `2001:db8:1:2::/64` that gives `2001:db8:1:2::5`, and the address follows
 automatically when the prefix changes.
 
+Containers on the macvlan network of that interface, which is what
+`Custom : eth0` in a container template means, get a suffix of their own in the
+same page. Leave the template's **Fixed IP address** field empty for IPv6: an
+address pinned there belongs to the subnet Docker was created with and dies with
+the prefix.
+
 ## Why a plugin and not one line of config
 
 dhcpcd 9.x, which Unraid ships, forms its SLAAC address from the MAC
@@ -17,8 +23,13 @@ advertisements itself and leaves `accept_ra` at 0, so the kernel never forms a
 SLAAC address that a token could shape. The plugin therefore maintains a second
 address and follows prefix changes through `ip -6 monitor`.
 
-dhcpcd 10 adds `slaac token <token>`, which replaces all of this. Once Unraid
-ships that version, a single line in `dhcpcd.conf` does the same job.
+dhcpcd 10 adds `slaac token <token>`, which replaces the host half of this.
+Once Unraid ships that version, a single line in `dhcpcd.conf` does that job.
+
+Containers are the other way round: inside the namespace the kernel does do
+SLAAC, so a token works there and gives a real fixed interface identifier. It
+lives in the network namespace and is gone after every container start, which
+is why the daemon watches `docker events`.
 
 ## Install
 

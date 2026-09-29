@@ -1,12 +1,18 @@
 #!/bin/bash
 # Keeps <delegated prefix><suffix> on the configured interface, so the host
-# keeps a short IPv6 when the ISP hands out a new prefix.
+# keeps a short IPv6 when the ISP hands out a new prefix, and does the same for
+# containers on the macvlan network of that interface.
 #
-# dhcpcd 9.x forms its address from the MAC (slaac hwaddr) and has no option for
-# a fixed suffix. The kernel token mechanism does not help either, because
-# dhcpcd handles the router advertisements itself and leaves accept_ra at 0, so
-# the kernel never forms a SLAAC address of its own. Hence a second address,
-# maintained here. dhcpcd 10 adds "slaac token", which would replace all of this.
+# dhcpcd 9.x forms the host address from the MAC (slaac hwaddr) and has no
+# option for a fixed suffix. The kernel token mechanism does not help there
+# either, because dhcpcd handles the router advertisements itself and leaves
+# accept_ra at 0, so the kernel never forms a SLAAC address of its own. Hence a
+# second address for the host, maintained here. dhcpcd 10 adds "slaac token",
+# which would replace that part.
+#
+# Inside a container the kernel does do SLAAC, so there a token works and gives
+# a real fixed interface identifier. It lives in the network namespace and is
+# gone after every container start, which is why this watches docker events.
 
 CFG=/boot/config/plugins/stable-ipv6/stable-ipv6.cfg
 STATE=/var/run/stable-ipv6.addr
@@ -17,7 +23,7 @@ IFACE=eth0
 SUFFIX=::5
 [[ -f $CFG ]] && . "$CFG"
 
-# One instance only, a second start would stack another monitor on the same link.
+# One instance only, a second start would stack another watcher on the same link.
 exec 9>"$LOCK"
 flock -n 9 || exit 0
 echo $$ > "$PIDFILE"
@@ -48,14 +54,50 @@ sync_address() {
     fi
 }
 
+# The config key for a container, sanitised the same way the settings page does.
+token_key() {
+    printf 'TOK_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
+}
+
+sync_tokens() {
+    local name key want pid have
+    while read -r name; do
+        key=$(token_key "$name")
+        want=${!key}
+        [[ -n $want ]] || continue
+        pid=$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)
+        [[ -n $pid && $pid != 0 ]] || continue
+        # Docker always names the container side eth0, whatever the parent is.
+        have=$(nsenter -t "$pid" -n ip token show dev eth0 2>/dev/null | awk '{print $2}')
+        [[ $have == "$want" ]] && continue
+        if nsenter -t "$pid" -n ip token set "$want" dev eth0 2>/dev/null; then
+            logger -t stable-ipv6 "$name now uses token $want"
+        fi
+    done < <(docker ps --format '{{.Names}}|{{.Networks}}' 2>/dev/null |
+             awk -F'|' -v n="$IFACE" '$2 == n {print $1}')
+}
+
 sync_address
+sync_tokens
 
-# Process substitution instead of a pipe, so the loop runs in this shell and the
-# trap can take the monitor down with us instead of leaving it orphaned.
-exec 3< <(ip -6 monitor address route dev "$IFACE" 2>/dev/null)
+# One stream for both sources. A named pipe instead of process substitution, so
+# both writers have a PID the trap can take down.
+FIFO=$(mktemp -u -t stable-ipv6.XXXXXX)
+mkfifo -m 600 "$FIFO" || exit 1
+exec 3<>"$FIFO"
+rm -f "$FIFO"
+
+ip -6 monitor address route dev "$IFACE" >&3 2>/dev/null &
 MONITOR=$!
-trap 'kill $MONITOR 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
+# A container start creates a fresh namespace, which has no token.
+docker events --filter type=container --filter event=start --format start >&3 2>/dev/null &
+EVENTS=$!
+trap 'kill $MONITOR $EVENTS 2>/dev/null; rm -f "$PIDFILE"; exit 0' TERM INT EXIT
 
-while read -r _ <&3; do
+# The timeout makes the docker watcher non-critical: if it dies with the docker
+# service, a container start is still picked up on the next pass.
+while :; do
+    read -r -t 60 _ <&3
     sync_address
+    sync_tokens
 done
